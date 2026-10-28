@@ -1,0 +1,280 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Arena - Multiplayer Game</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#080b18;color:#eef3ff;font-family:Arial,sans-serif}
+main{max-width:1000px;margin:auto;padding:20px}
+h1{font-size:42px;color:#59f3e5;margin:12px 0}
+p{color:#aab7d6}
+.panel{background:#11172b;border:1px solid #303b61;border-radius:16px;padding:18px}
+.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+label{display:block;color:#aab7d6;margin-bottom:6px}
+input,button{width:100%;padding:12px;border-radius:9px;border:1px solid #455477;font-size:15px}
+input{background:#080d20;color:white}
+button{background:#192342;color:white;font-weight:bold;cursor:pointer}
+button.primary{background:#59f3e5;color:#08131b}
+#status{margin:15px 0;color:#59f3e5}
+canvas{width:100%;height:auto;display:block;background:#080d20;border-radius:12px;border:1px solid #34416c;touch-action:none}
+.stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px}
+.stats span{background:#080d20;padding:9px 12px;border-radius:8px}
+small{color:#aab7d6}
+</style>
+</head>
+<body>
+<main>
+<h1>NEON ARENA</h1>
+<p>Collect glowing energy orbs. Avoid the pink pulse. Challenge a friend!</p>
+<section class="panel">
+<div class="controls">
+<div><label for="name">Player name</label><input id="name" value="Player One" maxlength="14"></div>
+<div><label for="room">Room code</label><input id="room" value="NEON7" maxlength="18"></div>
+<div><label>&nbsp;</label><button class="primary" id="host">Host room</button></div>
+<div><label>&nbsp;</label><button id="join">Join room</button></div>
+</div>
+<div id="status">Offline. Host a room or join a friend.</div>
+<canvas id="game" width="960" height="540"></canvas>
+<div class="stats">
+<span>Score: <b id="score">0</b></span>
+<span>Orbs: <b id="orbs">0</b></span>
+<span>Players: <b id="count">1</b></span>
+</div>
+<p><b>Controls:</b> WASD or arrow keys. On mobile, touch or drag on the game field.</p>
+<button id="disconnect">Disconnect</button>
+</section>
+<p><small>Multiplayer uses PeerJS and requires internet access. For cross-device play, publish this page over HTTPS.</small></p>
+</main>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const canvas = $('game'), ctx = canvas.getContext('2d');
+const W = 960, H = 540;
+let peer = null, conn = null, hostMode = false, connected = false;
+let myId = 'local', players = {}, orbs = [], last = performance.now();
+let pulse = {x:480,y:270,r:48,phase:0};
+let keys = {}, pointer = null, lastSync = 0, lastSpawn = 0;
+const colors = ['#59f3e5','#ff5eaa'];
+
+function setStatus(s){$('status').textContent=s}
+function roomId(){return 'neon-arena-'+$('room').value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,18)}
+function makePlayer(id,name,index){
+ return {id,name,x:index?780:180,y:270,vx:0,vy:0,r:15,
+ color:colors[index%2],score:0}
+}
+function seedOrbs(){
+ orbs=[];
+ for(let i=0;i<9;i++) orbs.push({
+  x:50+Math.random()*(W-100),
+  y:50+Math.random()*(H-100),r:8,phase:Math.random()*6
+ });
+}
+function send(data){if(conn&&conn.open)conn.send(data)}
+function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+
+function closeNetwork(){
+ if(conn){try{conn.close()}catch(e){}}
+ if(peer){try{peer.destroy()}catch(e){}}
+ conn=null;peer=null;connected=false;hostMode=false;
+ myId='local';players={local:makePlayer('local',$('name').value||'Player',0)};
+ $('host').disabled=false;$('join').disabled=false;
+ setStatus('Disconnected.');
+ $('count').textContent='1';
+}
+function connectPeer(id){
+ return new Promise((resolve,reject)=>{
+  peer=new Peer(id? id:undefined,{debug:0});
+  peer.on('open',resolve);
+  peer.on('error',reject);
+  peer.on('connection',c=>{
+   if(!hostMode || (conn&&conn.open)){c.close();return}
+   conn=c;wire(c,false);
+  });
+ });
+}
+function wire(c,guestSide){
+ c.on('open',()=>{
+  connected=true;
+  $('host').disabled=true;$('join').disabled=true;
+  setStatus('Connected to room '+$('room').value.toUpperCase());
+  if(guestSide){
+   send({type:'hello',name:$('name').value||'Guest'});
+  }else{
+   players.guest=makePlayer('guest','Guest',1);
+   send({type:'welcome',players,orbs,pulse});
+  }
+ });
+ c.on('data',d=>{
+  if(!d||!d.type)return;
+  if(hostMode){
+   if(d.type==='hello'){
+    players.guest=makePlayer('guest',d.name||'Guest',1);
+    send({type:'welcome',players,orbs,pulse});
+   }
+   if(d.type==='input'&&players.guest){
+    players.guest.vx=d.vx;players.guest.vy=d.vy;
+   }
+  }else{
+   if(d.type==='welcome'||d.type==='state'){
+    if(d.players)players=d.players;
+    if(d.orbs)orbs=d.orbs;
+    if(d.pulse)pulse=d.pulse;
+    if(d.type==='welcome'){
+     myId='guest';
+     if(!players.guest)players.guest=makePlayer('guest',$('name').value,1);
+     players.guest.name=$('name').value||'Guest';
+    }
+   }
+  }
+ });
+ c.on('close',()=>{
+  if(hostMode){
+   delete players.guest;connected=false;
+   setStatus('Friend disconnected. Waiting for another player.');
+  }else closeNetwork();
+ });
+ c.on('error',()=>setStatus('Connection error. Check internet and room code.'));
+}
+async function hostRoom(){
+ const code=$('room').value.trim();
+ if(!code){setStatus('Enter a room code first.');return}
+ closeNetwork();hostMode=true;myId='host';
+ players={host:makePlayer('host',$('name').value||'Host',0)};
+ seedOrbs();
+ try{
+  await connectPeer(roomId());
+  setStatus('Room ready! Share code: '+code.toUpperCase());
+  $('host').disabled=true;$('join').disabled=true;
+ }catch(e){
+  closeNetwork();
+  setStatus('Could not host. Try a new room code or refresh the page.');
+ }
+}
+async function joinRoom(){
+ const code=$('room').value.trim();
+ if(!code){setStatus('Enter the host room code.');return}
+ closeNetwork();hostMode=false;
+ setStatus('Connecting to room '+code.toUpperCase()+'...');
+ try{
+  await connectPeer();
+  conn=peer.connect(roomId(),{reliable:true});
+  wire(conn,true);
+ }catch(e){
+  closeNetwork();
+  setStatus('Could not connect. Ask the host to create the room first.');
+ }
+}
+$('host').onclick=hostRoom;
+$('join').onclick=joinRoom;
+$('disconnect').onclick=closeNetwork;
+
+window.addEventListener('keydown',e=>{
+ keys[e.key.toLowerCase()]=true;
+ if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key))e.preventDefault();
+});
+window.addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+
+function pointFromEvent(e){
+ const r=canvas.getBoundingClientRect();
+ return {x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height};
+}
+canvas.addEventListener('pointerdown',e=>{
+ canvas.setPointerCapture(e.pointerId);pointer=pointFromEvent(e);
+});
+canvas.addEventListener('pointermove',e=>{if(pointer)pointer=pointFromEvent(e)});
+canvas.addEventListener('pointerup',()=>pointer=null);
+canvas.addEventListener('pointercancel',()=>pointer=null);
+
+function movePlayer(p,dt){
+ let x=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0);
+ let y=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0);
+ if(pointer){
+  x=pointer.x-p.x;y=pointer.y-p.y;
+  const n=Math.hypot(x,y);
+  if(n>1){x/=n;y/=n}else{x=0;y=0}
+ }
+ const n=Math.hypot(x,y);
+ if(n>1){x/=n;y/=n}
+ p.vx=x*230;p.vy=y*230;
+ p.x=Math.max(p.r,Math.min(W-p.r,p.x+p.vx*dt));
+ p.y=Math.max(p.r,Math.min(H-p.r,p.y+p.vy*dt));
+}
+function update(dt,t){
+ if(hostMode){
+  for(const p of Object.values(players)){
+   if(p.id==='host')movePlayer(p,dt);
+   else{
+    p.x=Math.max(p.r,Math.min(W-p.r,p.x+p.vx*dt));
+    p.y=Math.max(p.r,Math.min(H-p.r,p.y+p.vy*dt));
+   }
+  }
+  pulse.phase+=dt*1.8;
+  pulse.x=W/2+Math.cos(pulse.phase)*220;
+  pulse.y=H/2+Math.sin(pulse.phase*1.3)*115;
+  for(const p of Object.values(players)){
+   for(let i=orbs.length-1;i>=0;i--){
+    if(distance(p,orbs[i])<p.r+orbs[i].r+12){
+     p.score=(p.score||0)+10;orbs.splice(i,1);
+    }
+   }
+   if(distance(p,pulse)<p.r+pulse.r*.55){
+    p.score=Math.max(0,(p.score||0)-1);
+    p.x=p.x<W/2?70:W-70;p.y=H/2;
+   }
+  }
+  if(orbs.length<9&&t-lastSpawn>900){
+   orbs.push({x:50+Math.random()*(W-100),y:50+Math.random()*(H-100),r:8,phase:Math.random()*6});
+   lastSpawn=t;
+  }
+  if(t-lastSync>50){send({type:'state',players,orbs,pulse});lastSync=t}
+ }else if(connected){
+  const p=players.guest;
+  if(p){movePlayer(p,dt);send({type:'input',vx:p.vx,vy:p.vy})}
+ }
+}
+function draw(t){
+ ctx.clearRect(0,0,W,H);
+ ctx.fillStyle='#080d20';ctx.fillRect(0,0,W,H);
+ ctx.strokeStyle='#172447';ctx.lineWidth=1;
+ for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke()}
+ for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}
+ ctx.strokeStyle='#34416c';ctx.lineWidth=3;ctx.strokeRect(15,15,W-30,H-30);
+ for(const o of orbs){
+  ctx.beginPath();ctx.fillStyle='#59f3e5';ctx.shadowColor='#59f3e5';ctx.shadowBlur=18;
+  ctx.arc(o.x,o.y,o.r,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+ }
+ if(hostMode||connected){
+  ctx.beginPath();ctx.fillStyle='#ff5eaa';ctx.shadowColor='#ff5eaa';ctx.shadowBlur=22;
+  ctx.arc(pulse.x,pulse.y,pulse.r*.55,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+ }
+ for(const p of Object.values(players)){
+  ctx.beginPath();ctx.fillStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=18;
+  ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+  ctx.fillStyle='#08101d';ctx.font='bold 10px Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText((p.name||'P').slice(0,2).toUpperCase(),p.x,p.y);
+  ctx.fillStyle='#eef3ff';ctx.font='12px Arial';ctx.fillText(p.name,p.x,p.y-25);
+ }
+ $('score').textContent=Object.values(players).reduce((n,p)=>n+(p.score||0),0);
+ $('orbs').textContent=orbs.length;
+ $('count').textContent=Object.keys(players).length;
+ if(!connected&&!hostMode){
+  ctx.fillStyle='#dce6ff';ctx.textAlign='center';ctx.font='bold 25px Arial';
+  ctx.fillText('NEON ARENA',W/2,H/2-12);
+  ctx.fillStyle='#93a5ce';ctx.font='16px Arial';
+  ctx.fillText('Host a room or join a friend',W/2,H/2+22);
+ }
+}
+function loop(t){
+ const dt=Math.min(.04,(t-last)/1000);last=t;
+ update(dt,t);draw(t);requestAnimationFrame(loop);
+}
+players.local=makePlayer('local',$('name').value,0);
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
